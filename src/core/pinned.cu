@@ -323,6 +323,8 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
     // Register with CUDA BEFORE any page is touched: cudaHostRegister pins what is resident now, and a region
     // that has already been faulted in page by page is far more expensive to register and may fail outright.
     if (base) {
+        const char* register_env = std::getenv("STRATA_ARENA_REGISTER");
+        const bool register_cuda = register_env == nullptr || std::string(register_env) != "0";
         // #243: STRATA_ARENA_PIN_GIB=N caps the registration from the start where the caller set no cap
         const int env_gib = arena_pin_cap_gib();
         uint64_t cap = max_pinned_bytes;
@@ -331,13 +333,13 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             cap = (uint64_t) env_gib << 30;
             cap_why = "by STRATA_ARENA_PIN_GIB";
         }
-        const bool capped = cap > 0 && cap < bytes && bounds.size() >= 2;
-        const cudaError_t e = capped ? cudaSuccess :
+        const bool capped = register_cuda && cap > 0 && cap < bytes && bounds.size() >= 2;
+        const cudaError_t e = !register_cuda ? cudaErrorNotSupported : capped ? cudaSuccess :
             cudaHostRegister(base, (size_t) bytes, cudaHostRegisterPortable | cudaHostRegisterMapped);
-        if (!capped && e == cudaSuccess) {
+        if (register_cuda && !capped && e == cudaSuccess) {
             note = "cudaHostRegister PORTABLE ok; " + note;
             registered_bytes = bytes;
-        } else if (bounds.size() >= 2 && (capped || clear_error())) {
+        } else if (register_cuda && bounds.size() >= 2 && (capped || clear_error())) {
             // Plan v0.3 P5: the whole range is refused, so pin it slice by slice from the start.  The rest stays
             // resident through the working-set lock below.  (P6: slices may differ in size, one per layer.)
             slice_bytes = 1;   // sliced; the uniform constructor records the size
@@ -379,8 +381,10 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                 }
             }
         } else {
-            note = std::string("cudaHostRegister FAILED (") + cudaGetErrorString(e) +
-                   ") - the arena is NOT pinned, so copies will be slow; " + note;
+            note = register_cuda
+                ? std::string("cudaHostRegister FAILED (") + cudaGetErrorString(e) +
+                      ") - the arena is NOT pinned, so copies will be slow; " + note
+                : "cudaHostRegister disabled (STRATA_ARENA_REGISTER=0); " + note;
             // **CONSUME THE ERROR, OR IT LIES ABOUT SOMETHING ELSE LATER.**
             //
             // `cudaGetLastError()` returns the last error and CLEARS it; until something reads it, the error
