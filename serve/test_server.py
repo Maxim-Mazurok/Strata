@@ -35,6 +35,32 @@ class RecordingEngine(MockEngine):
         yield from super().generate(ids, max_new, sampling, cancel, embeddings)
 
 
+class ContinuationTemplate(unittest.TestCase):
+    def setUp(self):
+        self.template = ChatTemplate(ROOT / "serve/chat_template.jinja")
+
+    def test_continues_unfinished_reasoning(self):
+        prompt = self.template.render([
+            {"role": "user", "content": "Think"},
+            {"role": "assistant", "content": "", "reasoning_content": "partial thought"},
+        ], add_generation_prompt=False, continue_final_message=True)
+        self.assertTrue(prompt.endswith("<think>\npartial thought"), prompt)
+
+    def test_continues_unfinished_answer(self):
+        prompt = self.template.render([
+            {"role": "user", "content": "Answer"},
+            {"role": "assistant", "content": "partial answer", "reasoning_content": "done thinking"},
+        ], add_generation_prompt=False, continue_final_message=True)
+        self.assertTrue(prompt.endswith("</think>\n\npartial answer"), prompt)
+
+    def test_rejects_continuation_without_final_assistant(self):
+        from serve.frontend import openai_to_messages
+
+        with self.assertRaisesRegex(ValueError, "final assistant"):
+            openai_to_messages({"messages": [{"role": "user", "content": "hello"}],
+                                "continue_final_message": True})
+
+
 class MaxTokens(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

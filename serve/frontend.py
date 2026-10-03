@@ -194,6 +194,10 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
             kwargs = {"enable_thinking": False}
         elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
             kwargs.update(effort_kwargs(v))
+    if req.get("continue_final_message"):
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError("continue_final_message requires a final assistant message")
+        kwargs["continue_final_message"] = True
     return _late_system_to_user(messages), tools, kwargs
 
 

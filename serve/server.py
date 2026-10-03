@@ -977,6 +977,9 @@ class Service:
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
                        "prompt_ms": 0.0, "decode_ms": 0.0,
                        "drafts_offered": 0, "drafts_accepted": 0}   # #457: the MTP drafts, summed where reported
+        self.metrics_log = os.environ.get("STRATA_METRICS_LOG")
+        if self.metrics_log:
+            Path(self.metrics_log).parent.mkdir(parents=True, exist_ok=True)
         self.last_timings = None                         # the last finished request's, llama.cpp's names (/v1/status)
         self.last_request_at = None                      # when a request last started or finished
         self.started_at = time.time()
@@ -1337,7 +1340,10 @@ class Service:
     def prepare(self, messages, tools, kwargs, max_new=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context."""
-        prompt = self.template.render(messages, tools=tools, **kwargs)
+        kwargs = dict(kwargs)
+        continuing = bool(kwargs.pop("continue_final_message", False))
+        prompt = self.template.render(messages, tools=tools, add_generation_prompt=not continuing,
+                                      continue_final_message=continuing, **kwargs)
         ids = self.tok.encode(prompt, parse_special=True)
         self.embeddings.path = None
         images = images_of(messages)
@@ -1389,7 +1395,9 @@ class Service:
                                  f"max_tokens (at most {max(0, room)} here), or add \"fit_max_tokens\": true to the "
                                  "model's strata-<model>.json to shorten it to the room left (#545)")
             max_new = max(1, room)          # --fit-max-tokens: a shorter completion beats a 400
-        return ids, kwargs.get("enable_thinking", True) is not False, max_new
+        continuing_answer = continuing and bool(messages[-1].get("content"))
+        thinking = kwargs.get("enable_thinking", True) is not False and not continuing_answer
+        return ids, thinking, max_new
 
     def _note(self, n, evs):
         with self.status_lock:
@@ -1555,7 +1563,7 @@ class Service:
                             loaded = str(cvec) not in ("0", "", "None")
                             hit_rate = round(last["hits"] / last["lookups"], 3) if last.get("lookups") else None
                             seen = prompt_tokens_seen(len(ids), last)   # #471: < len(ids) when cancelled mid-read
-                            self.history.append({
+                            record = {
                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
                                 if loaded else None,
                                 "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
@@ -1564,13 +1572,17 @@ class Service:
                                 "prompt_total": len(ids), "prompt_read": last.get("prompt_read"),
                                 "engine_generated": last.get("generated"),
                                 "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
+                                "prefill_tok_s": round((seen - (last.get("reused") or 0)) /
+                                                        (last["prompt_ms"] / 1000), 1)
+                                if last.get("prompt_ms") else None,
                                 "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
                                 if n and last.get("generated") and last.get("decode_ms") else None,
                                 "hit_rate": hit_rate, "ram_blobs": last.get("ram_blobs"),
                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
                                 "drafts_offered": last.get("drafts_offered"),
-                                "drafts_accepted": last.get("drafts_accepted")})
+                                "drafts_accepted": last.get("drafts_accepted")}
+                            self.history.append(record)
                             t = self.totals
                             t["requests"] += 1
                             t["prompt_tokens"] += seen
@@ -1580,6 +1592,9 @@ class Service:
                             t["decode_ms"] += last.get("decode_ms") or 0.0
                             t["drafts_offered"] += last.get("drafts_offered") or 0
                             t["drafts_accepted"] += last.get("drafts_accepted") or 0
+                            if self.metrics_log:
+                                with open(self.metrics_log, "a", encoding="utf-8") as metrics_file:
+                                    metrics_file.write(json.dumps(record, separators=(",", ":")) + "\n")
                             fresh = getattr(self.engine, "last", None)
                             if fresh is not None and fresh is not before:      # the engine's clock for THIS request
                                 timings = request_timings(seen, n, last)
