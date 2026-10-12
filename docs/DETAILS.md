@@ -1740,6 +1740,12 @@ the pairs in which the switched arm won). They are here so you can try them on y
 - **`STRATA_ADAPT_SIGNAL=host`: the overlap's per-layer "landed" signal as a host function** (the 0.1.43 way). From 0.1.43.1 the default is a
   4-byte stream-ordered copy into pinned memory, which needs no driver callback thread: on a 20-core desktop (RTX 3060) the host
   functions still cost ~7 ms per window with the thread started early, because the pool's workers occupy every other CPU.
+- **`--prefill-head-alias` (`--serve`, one GPU): the output head's VRAM holds the prompt buffers while a prompt is read**,
+  and the head is read back in before the first generated token. It was not measured with the paired method above. On
+  an 8 GB RTX PRO 2000 Laptop (Windows, IQ3_XXS, 590 MiB reserve) it let the prompt path use 2,048-token chunks
+  instead of 512: prefill 292.5 -> 667.1 tok/s on a 29,854-token prompt (medians of 12 and 6 fresh-engine trials).
+  Reads of up to 512 fresh tokens cost about 0.6-0.75 s more per request, and the card had 0 MiB free while decoding.
+  Details, limits and the measurement: [PREFILL_HEAD_ALIAS.md](PREFILL_HEAD_ALIAS.md).
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 
